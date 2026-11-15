@@ -4,6 +4,18 @@
 
 ---
 
+## [1.3.6] - 2026-11-15
+
+### 修复
+
+- **H3C 登录 POST 补标准表单请求头**：`Content-Type: application/x-www-form-urlencoded` 与
+  `Accept`。iMC 缺少该头时会把 POST 当非法请求、返回 HTML 错误页，界面表现为
+  「认证响应解析失败 (服务器返回格式与预期不符)」。
+- **登录响应解析增强**：支持原始 JSON、前后缀夹 JSON（JSONP/调试文本）、百分号编码 JSON、
+  URL-safe base64；仍无法解析时从 `errorPage.jsp` 的 `errorinfo` 参数或
+  `<span id="id_errorinfo">` 提取具体原因并直接显示给用户。
+- 登录返回无法解码时，日志打印响应前 200 字符，便于真机排障。
+
 ## [1.3.5] - 2026-11-15
 
 ### 变更

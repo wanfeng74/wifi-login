@@ -367,18 +367,65 @@ function tryJson(text) {
  * net.js 把响应 body 以 latin1 交回 (保留字节), 这里按 UTF-8 还原中文。
  */
 export function decodePayload(text) {
-  var raw = String(text == null ? '' : text)
+  var raw = String(text == null ? '' : text).replace(/^\uFEFF/, '').trim()
+  if (!raw) return null
   var direct = tryJson(raw)
   if (direct) return direct
-
-  var compact = raw.replace(/\s+/g, '')
+  /* 前后缀夹 JSON (例如 JSONP / 调试文本) */
+  var gm = raw.match(/\{[\s\S]*\}/)
+  if (gm) {
+    var g = tryJson(gm[0])
+    if (g) return g
+  }
+  /* 百分号编码的 JSON (未 base64) */
+  var pct = percentDecode(raw)
+  var pj = tryJson(pct)
+  if (pj) return pj
+  var pm = pct.match(/\{[\s\S]*\}/)
+  if (pm) {
+    var pj2 = tryJson(pm[0])
+    if (pj2) return pj2
+  }
+  /* base64(百分号编码 JSON): 兼容标准/URL-safe/换行/缺 padding */
+  var compact = raw.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/').replace(/^data:[^,]*,/, '')
   if (!compact) return null
   var latin = utf8Decode(b64Decode(compact))
   if (!latin) return null
   var decoded = percentDecode(latin)
   /* percent 解码后的字节要按 UTF-8 还原, 否则中文会被当成 latin1 变成乱码 (JSON 结构仍合法) */
   var decodedUtf8 = utf8Decode(latin1ToBytes(decoded))
-  return tryJson(latin) || tryJson(decodedUtf8) || tryJson(decoded)
+  var cand = tryJson(latin) || tryJson(decodedUtf8) || tryJson(decoded)
+  if (cand) return cand
+  var mb = latin.match(/\{[\s\S]*\}/) || decodedUtf8.match(/\{[\s\S]*\}/) || decoded.match(/\{[\s\S]*\}/)
+  if (mb) {
+    var jb = tryJson(mb[0])
+    if (jb) return jb
+  }
+  return null
+}
+
+/*
+ * 从 iMC 的 HTML 错误页里提取可读原因:
+ *   /portal/page/errorPage.jsp?...&errorinfo=<base64(urlencoded 文本)>
+ *   <span id="id_errorinfo">Portal服务器获取不到设备信息…</span>
+ * 拿不到就退回 <title>。用于把"解析失败"变成具体原因。
+ */
+export function htmlErrorInfo(text) {
+  var t = String(text == null ? '' : text)
+  if (!t) return ''
+  var m = t.match(/errorinfo=([A-Za-z0-9%._~+\/=-]{8,})/i)
+  if (m) {
+    try {
+      var b = decodeURIComponent(m[1])
+      var dec = utf8Decode(b64Decode(b.replace(/-/g, '+').replace(/_/g, '/')))
+      if (dec && dec.replace(/\s/g, '')) return dec
+    } catch (e) {}
+  }
+  var s = t.match(/id=["']?id_errorinfo["']?[^>]*>([^<]{2,300})</i)
+  if (s) return s[1].replace(/\s+/g, ' ').trim()
+  var title = t.match(/<title[^>]*>([^<]{1,120})<\/title>/i)
+  if (title) return '错误页: ' + title[1].trim()
+  return ''
 }
 
 /* 返回码 -> 本地中文文案 (GBK/UTF-8 乱码时不依赖服务器原文) */
@@ -514,6 +561,10 @@ function headersFor(state, serverBase, username) {
   var appRoot = appRootOf(serverBase)
   h['Referer'] = (state && state.referer) || appRoot + 'index_default.jsp'
   h['Origin'] = baseOf(serverBase)
+  /* iMC 的 pws/心跳/下线都是表单 POST: 缺 Content-Type 时服务器会当成非法请求,
+   * 返回 HTML 错误页 (表现为"认证响应解析失败") —— 网页端浏览器一定会带这个头。 */
+  h['Content-Type'] = 'application/x-www-form-urlencoded'
+  h['Accept'] = 'text/html,application/json,*/*'
   var cookie = mergeCookie((state && state.cookie) || '', '')
   if (username) cookie = mergeCookie(cookie, 'hello1=' + username + '; hello2=false; i_p_c_op=false; i_p_c_un=' + username)
   if (cookie) h['Cookie'] = cookie
@@ -678,7 +729,7 @@ async function login(serverBase, o) {
           ? ' errorNumber=' + json.errorNumber +
             (json.portServIncludeFailedCode ? ' code=' + json.portServIncludeFailedCode : '') +
             (json.portServErrorCode ? ' errCode=' + json.portServErrorCode : '')
-          : ' 无法解码 text=' + String(res.text || '').slice(0, 80))
+          : ' 无法解码 text=' + String(res.text || '').slice(0, 200))
     )
     return { netFail: false, res: res, json: json }
   }
@@ -703,6 +754,11 @@ async function login(serverBase, o) {
     return { ok: false, code: -1, msg: out.res.error || '认证服务器无响应' }
   }
   if (!json) {
+    var he = htmlErrorInfo(out.res && out.res.text)
+    if (he) {
+      diag('登录返回错误页: ' + he)
+      return { ok: false, code: -1, msg: '认证服务器返回: ' + he }
+    }
     return { ok: false, code: -1, msg: '认证响应解析失败 (服务器返回格式与预期不符)' }
   }
   if (String(json.errorNumber) === '1') {
