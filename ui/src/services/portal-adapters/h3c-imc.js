@@ -38,6 +38,21 @@ import { log } from '../logger.js'
 
 var DEFAULT_PROXY_PORT = '50200'
 var DEFAULT_APP_ROOT_PATH = '/portal/'
+/* iMC 按浏览器请求处理; 少数部署缺 UA 会直接回空页/400 */
+var UA_WEB =
+  'Mozilla/5.0 (Linux; Android 9; Pen) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0 Mobile Safari/537.36'
+var ACCEPT_HTML = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+
+/*
+ * HTTP 头只允许可见 ASCII: 中文账号 (如 hello1=孙颖) 原样写进 Cookie 会被服务器
+ * 判为非法请求, 直接回 400 Bad Request (实测校园网就是这样)。非 ASCII 字符一律
+ * 百分号编码, 与浏览器写 Cookie 的行为一致。
+ */
+function asciiHeader(v) {
+  return String(v == null ? '' : v).replace(/[^\x20-\x7e]/g, function (c) {
+    return encodeURIComponent(c)
+  })
+}
 
 /* 诊断日志: 真机排障时能区分「服务器拒绝」/「旧 .so 丢了 body 与头」/「网络不通」 */
 function diag(msg) {
@@ -523,7 +538,11 @@ async function fetchPortalPage(serverBase, p, state) {
   var appRoot = appRootOf(serverBase)
   var q = portalQuery(p)
   var url = appRoot + (enc(q) ? '?' + enc(q) : '')
-  var res = await send({ url: url, timeout: 8 })
+  var res = await send({
+    url: url,
+    timeout: 8,
+    headers: { 'User-Agent': UA_WEB, Accept: ACCEPT_HTML },
+  })
   if (!res.ok) {
     diag('取门户页失败 url=' + url + ' err=' + (res.error || '-'))
     return { ok: false, msg: res.error || '无法连接认证服务器', res: res }
@@ -564,10 +583,20 @@ function headersFor(state, serverBase, username) {
   /* iMC 的 pws/心跳/下线都是表单 POST: 缺 Content-Type 时服务器会当成非法请求,
    * 返回 HTML 错误页 (表现为"认证响应解析失败") —— 网页端浏览器一定会带这个头。 */
   h['Content-Type'] = 'application/x-www-form-urlencoded'
-  h['Accept'] = 'text/html,application/json,*/*'
+  h['Accept'] = ACCEPT_HTML
+  h['User-Agent'] = UA_WEB
   var cookie = mergeCookie((state && state.cookie) || '', '')
-  if (username) cookie = mergeCookie(cookie, 'hello1=' + username + '; hello2=false; i_p_c_op=false; i_p_c_un=' + username)
+  if (username) {
+    /* 账号可能是中文: Cookie 里必须百分号编码, 否则服务器直接 400 */
+    var uname = encodeURIComponent(String(username))
+    cookie = mergeCookie(cookie, 'hello1=' + uname + '; hello2=false; i_p_c_op=false; i_p_c_un=' + uname)
+  }
   if (cookie) h['Cookie'] = cookie
+  /* 兜底: 任何头值都保证是可见 ASCII (非 ASCII 一律百分号编码) */
+  for (var k in h) {
+    if (!Object.prototype.hasOwnProperty.call(h, k)) continue
+    h[k] = asciiHeader(h[k])
+  }
   return h
 }
 
