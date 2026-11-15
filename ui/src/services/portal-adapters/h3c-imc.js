@@ -247,6 +247,24 @@ export function enc(params) {
   return parts.join('&')
 }
 
+/*
+ * "原样"查询串: 只转义会破坏结构的字符, 保留 `://` 等形状。
+ * NAS 返回的跳转页里是 userurl=http://... 原样; 浏览器按原样请求。
+ * 实测部分 iMC 对 URL 编码过的 userurl 直接返回空页/空响应。
+ */
+export function joinRawQuery(params) {
+  var parts = []
+  for (var k in params) {
+    if (!Object.prototype.hasOwnProperty.call(params, k)) continue
+    var v = params[k]
+    if (v === undefined || v === null) continue
+    var sv = String(v).replace(/[\r\n]/g, '')
+    if (/[&\s]/.test(sv)) sv = encodeURIComponent(sv)
+    parts.push(encodeURIComponent(k) + '=' + sv)
+  }
+  return parts.join('&')
+}
+
 /* ------------------------------------------------------------------ *
  * 参数 / 地址归一
  * ------------------------------------------------------------------ */
@@ -533,40 +551,63 @@ async function send(opts) {
   }
 }
 
-/* 取门户页: 建立页面会话 (Cookie) 并解析运行时配置 */
+/* 取门户页: 建立页面会话 (Cookie) 并解析运行时配置。
+ * 两种参数形态都试: 原样 (浏览器行为) 优先, 空响应再回退 URL 编码版。 */
 async function fetchPortalPage(serverBase, p, state) {
   var appRoot = appRootOf(serverBase)
   var q = portalQuery(p)
-  var url = appRoot + (enc(q) ? '?' + enc(q) : '')
-  var res = await send({
-    url: url,
-    timeout: 8,
-    headers: { 'User-Agent': UA_WEB, Accept: ACCEPT_HTML },
-  })
-  if (!res.ok) {
-    diag('取门户页失败 url=' + url + ' err=' + (res.error || '-'))
-    return { ok: false, msg: res.error || '无法连接认证服务器', res: res }
+  var rawQ = joinRawQuery(q)
+  var encQ = enc(q)
+  var variants = []
+  if (rawQ) variants.push({ mode: 'raw', url: appRoot + '?' + rawQ })
+  if (encQ && encQ !== rawQ) variants.push({ mode: 'enc', url: appRoot + '?' + encQ })
+  if (!variants.length) variants.push({ mode: 'none', url: appRoot })
+
+  var chosen = null
+  for (var i = 0; i < variants.length; i++) {
+    var v = variants[i]
+    var res = await send({
+      url: v.url,
+      timeout: 8,
+      headers: { 'User-Agent': UA_WEB, Accept: ACCEPT_HTML },
+    })
+    if (!res.ok) {
+      diag('取门户页失败 变体=' + v.mode + ' url=' + v.url + ' err=' + (res.error || '-'))
+      continue
+    }
+    var text = res.text || ''
+    diag('取门户页 变体=' + v.mode + ' status=' + (res.statusCode || 0) + ' len=' + text.length)
+    if (!chosen) chosen = { mode: v.mode, url: v.url, res: res, page: text }
+    if (text.length >= 32) {
+      chosen = { mode: v.mode, url: v.url, res: res, page: text }
+      break
+    }
   }
-  var page = res.text || ''
-  var cookie = mergeCookie((state && state.cookie) || '', cookiesFrom(res))
+  if (!chosen) return { ok: false, msg: '无法连接认证服务器', res: { ok: false, statusCode: 0, headers: {}, text: '', headerLines: [], error: '无法连接认证服务器' } }
+
+  var page = chosen.page
+  var res2 = chosen.res
+  var usedUrl = chosen.url
+  var cookie = mergeCookie((state && state.cookie) || '', cookiesFrom(res2))
   /* 外部拉起登录 (action=login) 时框架没有检测参数, 从页面里补 userip */
   var pageIp = ''
   var m = page.match(/userip\s*[:=]\s*["']?([0-9]{1,3}(?:\.[0-9]{1,3}){3})/i)
   if (m) pageIp = m[1]
   if (state) {
     state.cookie = cookie
-    state.pageUrl = url
-    state.referer = url
+    state.pageUrl = usedUrl
+    state.referer = usedUrl
     state.conf = parsePageConf(page)
     if (pageIp) state.pageUserip = pageIp
   }
   diag(
-    '取门户页 status=' + (res.statusCode || 0) + ' len=' + page.length +
+    '取门户页 status=' + (res2.statusCode || 0) + ' len=' + page.length +
+      ' 变体=' + chosen.mode +
       ' cookie=' + (cookie ? '有' : '无') +
       ' proxy=' + ((state && state.conf && state.conf.portalProxyIP) || '-') +
       ' ip=' + (pageIp || '-')
   )
-  return { ok: true, page: page, res: res, cookie: cookie }
+  return { ok: true, page: page, res: res2, cookie: cookie }
 }
 
 /* 响应里是否出现"已在线"标识 (仅用于日志, 不据此隐藏登录表单) */
@@ -728,14 +769,15 @@ async function login(serverBase, o) {
   var pre = await fetchPortalPage(serverBase, p, state)
   if (!pre.ok) return { ok: false, code: -1, msg: pre.msg || '无法连接认证服务器' }
 
-  var post = async function () {
+  var post = async function (rawMode) {
     var params = loginParams(serverBase, o, state)
-    var query = enc(params)
+    var query = rawMode ? joinRawQuery(params) : enc(params)
     var appRoot = appRootOf(serverBase)
     var url = appRoot + 'pws?t=li' + (query ? '&' + query : '')
     var headers = headersFor(state, serverBase, (o && o.username) || '')
     diag(
-      '登录 POST pws?t=li user=' + (params.userName || '-') +
+      '登录 POST pws?t=li' + (rawMode ? '(raw)' : '') +
+        ' user=' + (params.userName || '-') +
         ' ip=' + (params.userip || '-') +
         ' proxy=' + (params.portalProxyIP || '-') + ':' + (params.portalProxyPort || '-') +
         ' body=' + query.length + 'B header=' + Object.keys(headers).join('/')
@@ -763,8 +805,17 @@ async function login(serverBase, o) {
     return { netFail: false, res: res, json: json }
   }
 
-  var out = await post()
+  var out = await post(false)
   var json = out.json
+  /* 200 且响应体为空: iMC 可能不接受 URL 编码后的 userurl, 用原样参数再试一次 */
+  if (!out.netFail && !json && out.res && out.res.ok && !String(out.res.text || '').length) {
+    diag('登录返回空 body, 改用原样参数重试')
+    var rawOut = await post(true)
+    if (rawOut.json || (rawOut.res && String(rawOut.res.text || '').length)) {
+      out = rawOut
+      json = out.json
+    }
+  }
 
   /* 无响应/解析失败/会话失效: 刷新页面会话后重试一次 */
   var retriable =
@@ -774,7 +825,7 @@ async function login(serverBase, o) {
   if (retriable) {
     var again = await fetchPortalPage(serverBase, p, state)
     if (again.ok) {
-      out = await post()
+      out = await post(false)
       json = out.json
     }
   }
