@@ -584,10 +584,53 @@ async function loadConf(serverBase, p, state) {
     return { status: 'manual', msg: '认证服务器返回 HTTP ' + r.res.statusCode }
   }
   if (page.length < 32) {
-    return { status: 'manual', msg: '认证页内容异常 (可能不是门户服务器)' }
+    /*
+     * 真实 iMC 的 /portal/ 可能用 chunked / 无 Content-Length 返回页面:
+     * 旧版 libjsapi_panet.so 只会按 Content-Length 读 body, 会拿到空体 (实测 len=0)。
+     * 这里依次兜底:
+     *   1) 试常见登录页静态路径 (index_default.jsp 等, 常带固定 Content-Length);
+     *   2) 仍拿不到页面也放行登录表单 —— 登录参数走 query 双写, 页面配置都用默认值,
+     *      不让"取不到页面"直接判成"服务器不可用"(旧行为会把用户卡死在未识别状态)。
+     */
+    var alt = await tryAltPortalPages(serverBase, p, state)
+    if (alt && alt.page && alt.page.length >= 32) {
+      page = alt.page
+      diag('门户页为空, 备用路径成功: ' + alt.path + ' len=' + page.length)
+    } else {
+      diag('门户页为空(可能旧版原生库不支持 chunked), 仍提供登录表单')
+      return { status: 'ready', code: 0, msg: '门户页为空，已按默认参数尝试登录' }
+    }
   }
   if (pageLooksOnline(page)) diag('门户页含在线标识, 仍提供登录表单 (避免误藏表单)')
   return { status: 'ready', code: 0 }
+}
+
+/* /portal/ 返回空体时, 试 iMC 常见登录页路径 (同一 appRoot, 带相同查询参数) */
+async function tryAltPortalPages(serverBase, p, state) {
+  var paths = ['index_default.jsp', 'login.jsp', 'default.jsp', 'portal.jsp']
+  var q = portalQuery(p)
+  var suffix = enc(q) ? '?' + enc(q) : ''
+  var root = appRootOf(serverBase)
+  for (var i = 0; i < paths.length; i++) {
+    var url = root + paths[i] + suffix
+    var res = await send({ url: url, timeout: 3 })
+    if (!res || !res.ok) {
+      diag('备用门户页失败: ' + paths[i] + ' err=' + ((res && res.error) || '-'))
+      continue
+    }
+    var text = res.text || ''
+    diag('备用门户页: ' + paths[i] + ' status=' + (res.statusCode || 0) + ' len=' + text.length)
+    if (text.length >= 32) {
+      if (state) {
+        state.pageUrl = url
+        state.referer = url
+        state.conf = parsePageConf(text)
+        state.cookie = mergeCookie((state.cookie) || '', cookiesFrom(res))
+      }
+      return { page: text, path: paths[i] }
+    }
+  }
+  return null
 }
 
 /*

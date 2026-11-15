@@ -4,6 +4,23 @@
 
 ---
 
+## [1.3.4] - 2026-11-15
+
+### 修复
+
+- **H3C iMC 真实校园网取门户页为空**：真机日志显示校园网检测正常
+  （`status=portal`，`serverBase=http://10.65.169.253:8080`），但 `取门户页
+  status=200 len=0`，导致适配器误判"认证页内容异常"并卡在「需要认证（未识别服务器）」。
+  原因是 iMC 可能用 **chunked / 无 Content-Length** 返回页面，而笔上旧版
+  `libjsapi_panet.so` 只按 `Content-Length` 读 body，读到空体。
+  现加两级兜底：
+  1. `/portal/` 为空时依次试 `index_default.jsp` / `login.jsp` / `default.jsp` / `portal.jsp`
+     （带相同查询参数，通常带固定长度）；
+  2. 仍为空也**放行登录表单**（登录参数走 query 双写、页面配置用默认值），
+     日志标注「门户页为空」，不再把用户卡死。
+- 说明：新版 `native/panet/panet.cpp` 已支持 chunked 解码，CI 合并构建出的新 `.so`
+  会从根上解决（本地无 aarch64 工具链，本地包仍带旧 `.so`）。
+
 ## [1.3.3] - 2026-11-15
 
 ### 新增
