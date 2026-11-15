@@ -42,9 +42,10 @@
           <text class="infolabel">连通性测试</text>
           <text class="infovalue">{{ probeName }}</text>
         </div>
-        <div class="inforow" v-if="serverShow">
+        <div class="inforow" v-if="serverShow" @click="editServerOverride">
           <text class="infolabel">认证服务器</text>
           <text class="infovalue">{{ serverShow }}</text>
+          <text class="infolink">改</text>
         </div>
         <div class="inforow" v-if="portalPage">
           <text class="infolabel">跳转页面</text>
@@ -658,6 +659,14 @@ export default {
       if (r) r(result)
     },
 
+    /* 自动识别到服务器后仍允许手动改: 点「认证服务器」行即打开编辑 */
+    editServerOverride() {
+      if (!this.serverShow) return
+      this.showManualServer = true
+      this.manualServer = this.serverShow
+      this.setMsg('可修改认证服务器地址，改完点右侧「确 定」', 'info')
+      this.editServer()
+    },
     editServer() {
       var self = this
       this.openIme({
@@ -1555,6 +1564,11 @@ export default {
 }
 .msg-info {
   color: #a8c8ee;
+}
+.infolink {
+  font-size: 14px;
+  color: #2f7bd9;
+  margin-left: 10px;
 }
 /* ---- 输入兜底层 (无 global 模块的固件, 用 <input> 调系统软键盘) ---- */
 .imeoverlay {
