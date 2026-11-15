@@ -259,7 +259,8 @@ export function joinRawQuery(params) {
     var v = params[k]
     if (v === undefined || v === null) continue
     var sv = String(v).replace(/[\r\n]/g, '')
-    if (/[&\s]/.test(sv)) sv = encodeURIComponent(sv)
+    /* 非 ASCII 必须编码 (URL/header 不能带中文), 否则服务器回 400 */
+    if (/[&\s]/.test(sv) || /[^\x20-\x7e]/.test(sv)) sv = encodeURIComponent(sv)
     parts.push(encodeURIComponent(k) + '=' + sv)
   }
   return parts.join('&')

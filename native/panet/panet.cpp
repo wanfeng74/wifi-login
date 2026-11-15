@@ -296,17 +296,18 @@ static HttpResponse parseResponse(const std::string &raw)
 
     bool chunked = transferEncoding.find("chunked") != std::string::npos;
     if (chunked) {
-        // dechunk
+        // dechunk: 兼容 "\r\n" 与裸 "\n" 两种分帧 (部分嵌入式 HTTP 服务只用 \n,
+        // 旧实现只找 \r\n 会解码出空 body —— 真机 iMC 动态页面就是这种)
         std::string out;
         size_t pos = 0;
         for (;;) {
-            size_t eol = body.find("\r\n", pos);
+            size_t eol = body.find('\n', pos);
             if (eol == std::string::npos) break;
             std::string sizeLine = trim(body.substr(pos, eol - pos));
             size_t semi = sizeLine.find(';');
             if (semi != std::string::npos) sizeLine = sizeLine.substr(0, semi);
             unsigned long chunkLen = strtoul(sizeLine.c_str(), NULL, 16);
-            pos = eol + 2;
+            pos = eol + 1;
             if (chunkLen == 0) break;
             if (pos + chunkLen > body.size()) {
                 out += body.substr(pos);
@@ -314,7 +315,10 @@ static HttpResponse parseResponse(const std::string &raw)
                 break;
             }
             out += body.substr(pos, chunkLen);
-            pos += chunkLen + 2; // 跳过块尾 CRLF
+            pos += chunkLen;
+            // 跳过块尾: "\r\n" 或 "\n" (也容忍缺失)
+            if (pos < body.size() && body[pos] == '\r') pos++;
+            if (pos < body.size() && body[pos] == '\n') pos++;
         }
         r.body = out;
     } else if (!contentLength.empty()) {
