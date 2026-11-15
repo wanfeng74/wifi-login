@@ -16,19 +16,6 @@ import globalModule from 'global'
 
 var manager = null
 
-/*
- * 系统输入法是否可用: 依赖固件导出 `global` 原生模块 (Global.startTextEdit)。
- * CVI 固件只导出 http/storage, 这里会返回 false —— 调用方应改用 <input> 组件兜底
- * (框架自带输入法, 不依赖 global 模块)。
- */
-export function isSystemImeAvailable() {
-  try {
-    return !!(globalModule && typeof globalModule.Global === 'function')
-  } catch (e) {
-    return false
-  }
-}
-
 function getManager() {
   if (!manager) manager = new globalModule.Global()
   return manager
