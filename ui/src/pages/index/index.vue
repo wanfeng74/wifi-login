@@ -117,6 +117,30 @@
       <text class="msg msg-info" v-if="msgType === 'info'">{{ msg }}</text>
       <text class="msg msg-info" v-if="!msg">就绪</text>
     </div>
+
+    <!-- 输入兜底 (CVI 等无 global 模块的固件): 用框架 <input> 唤起固件自带软键盘 -->
+    <div class="imeoverlay" v-if="imeOverlay">
+      <div class="imecard">
+        <text class="imetitle" v-if="imeOverlayTitle">{{ imeOverlayTitle }}</text>
+        <input
+          class="imeinput"
+          :type="imeOverlayPassword ? 'password' : 'text'"
+          :value="imeOverlayValue"
+          :placeholder="imeOverlayPlaceholder"
+          maxlength="64"
+          autofocus="true"
+          @input="onImeOverlayInput"
+        />
+        <div class="imebtns">
+          <div class="imebtn" @click="imeOverlayCancel">
+            <text class="imebtn-text">取消</text>
+          </div>
+          <div class="imebtn imebtn-primary" @click="imeOverlayConfirm">
+            <text class="imebtn-text">{{ imeOverlayConfirmText }}</text>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -127,7 +151,7 @@ import { loadAccount, saveAccount } from '../../services/store.js'
 import { wifiSsid, writeStatusFile } from '../../services/net.js'
 import { confirmServerUsable } from '../../services/server-probe.js'
 import { log, initLog } from '../../services/logger.js'
-import { SystemIme } from '../../services/ime.js'
+import { SystemIme, isSystemImeAvailable } from '../../services/ime.js'
 
 /* 管理页判定"服务器不可用"后, 这段时间内不再自动进入 (用户手动重检可立即解除) */
 const MANAGE_COOLDOWN_MS = 180000
@@ -165,6 +189,13 @@ export default {
       showForm: false,
       showManualServer: false,
       manualServer: '',
+      /* 输入兜底 (CVI 等无 global 模块的固件): 用 <input> 组件唤起系统软键盘 */
+      imeOverlay: false,
+      imeOverlayValue: '',
+      imeOverlayTitle: '',
+      imeOverlayPlaceholder: '',
+      imeOverlayPassword: false,
+      imeOverlayConfirmText: '确定',
       msg: '',
       msgType: 'info',
     }
@@ -412,6 +443,7 @@ export default {
         if (this._manageClosedToken) $falcon.off('wifiManageClosed', this._manageClosedToken)
       } catch (e) {}
       this.stopHeartbeat()
+      if (this.imeOverlay) this._closeImeOverlay(null)
       if (this.ime) {
         this.ime.destroy()
         this.ime = null
@@ -551,9 +583,10 @@ export default {
       }
     },
 
-    /* ---- 系统输入法输入 (global.startTextEdit, skill 状态机) ---- */
+    /* ---- 输入: 优先系统 IME (global 模块), 不可用时用 <input> 组件兜底 ---- */
     openIme(opts) {
       var self = this
+      if (!isSystemImeAvailable() || !this.ime) return this.openImeOverlay(opts)
       this._imeBusy = true
       return this.ime.open(opts).then(function (v) {
         self._imeBusy = false
@@ -565,6 +598,43 @@ export default {
         return null
       })
     },
+
+    /*
+     * CVI / 无 global 模块固件的输入兜底: 弹一个带 <input> 的输入层。
+     * <input> 是框架组件, 默认会拉起固件自带软键盘 (不需要 global 模块)。
+     */
+    openImeOverlay(opts) {
+      var self = this
+      var o = opts || {}
+      this.imeOverlayTitle = o.title || ''
+      this.imeOverlayPlaceholder = o.placeholder || ''
+      this.imeOverlayPassword = o.password === true
+      this.imeOverlayConfirmText = o.enterButtonText || '确定'
+      this.imeOverlayValue = o.text || ''
+      this.imeOverlay = true
+      this._imeBusy = true
+      return new Promise(function (resolve) {
+        self._imeOverlayResolver = resolve
+      })
+    },
+    onImeOverlayInput(v) {
+      this.imeOverlayValue = String(v == null ? '' : v)
+    },
+    imeOverlayConfirm() {
+      this._closeImeOverlay(this.imeOverlayValue)
+    },
+    imeOverlayCancel() {
+      this._closeImeOverlay(null)
+    },
+    _closeImeOverlay(result) {
+      this.imeOverlay = false
+      this._imeBusy = false
+      this._imeClosedAt = Date.now()
+      var r = this._imeOverlayResolver
+      this._imeOverlayResolver = null
+      if (r) r(result)
+    },
+
     editServer() {
       var self = this
       this.openIme({
@@ -597,6 +667,7 @@ export default {
         placeholder: '请输入密码',
         maxlength: 64,
         enterButtonText: '确定',
+        password: true,
       }).then(function (v) {
         if (v == null) return
         self.password = v.replace(/^\s+|\s+$/g, '')
@@ -1446,5 +1517,60 @@ export default {
 }
 .msg-info {
   color: #a8c8ee;
+}
+/* ---- 输入兜底层 (无 global 模块的固件, 用 <input> 调系统软键盘) ---- */
+.imeoverlay {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.78);
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+}
+.imecard {
+  width: 82%;
+  background-color: #1c1c1c;
+  border-radius: 12px;
+  padding: 16px;
+  flex-direction: column;
+}
+.imetitle {
+  font-size: 18px;
+  color: #ffffff;
+  margin-bottom: 10px;
+}
+.imeinput {
+  height: 46px;
+  background-color: #2a2a2a;
+  border-radius: 8px;
+  color: #ffffff;
+  font-size: 18px;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.imebtns {
+  flex-direction: row;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+.imebtn {
+  height: 38px;
+  padding-left: 20px;
+  padding-right: 20px;
+  margin-left: 12px;
+  border-radius: 19px;
+  background-color: #333333;
+  justify-content: center;
+  align-items: center;
+}
+.imebtn-primary {
+  background-color: #2f7df6;
+}
+.imebtn-text {
+  font-size: 16px;
+  color: #ffffff;
 }
 </style>

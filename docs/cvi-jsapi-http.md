@@ -109,7 +109,11 @@ CVI 又拿不到 Location 头，只能从页面里取）。
    「功能检测」），真实校园门户的重定向页解析（`portalProxyIP`）建议在目标网络复测；
 3. **storage 持久化**：`$falcon.jsapi.storage` 方法存在，原生 Promise 可能挂起
    （与逆向笔记一致）；`store-core.js` 已加 1.5s 超时与多形态兜底，账号持久化按
-   "可用则存、不可用则内存"处理，失败不影响登录主流程。
+   "可用则存、不可用则内存"处理，失败不影响登录主流程；
+4. **输入法**：该固件 `$falcon.jsapi` 没有 `global` 模块，`Global.startTextEdit` 不可用
+   （点输入框无反应）。1.3.1 起改用框架 `<input>` 组件唤起自带软键盘的兜底输入层
+   （`index.vue` 的 `openImeOverlay`），须在真机确认软键盘能弹出、能提交文本。
+
 
 ## 7. 复现方法
 
