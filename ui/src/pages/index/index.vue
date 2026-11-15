@@ -583,19 +583,40 @@ export default {
       }
     },
 
-    /* ---- 输入: 优先系统 IME (global 模块), 不可用时用 <input> 组件兜底 ---- */
+    /* ---- 输入: 优先系统 IME (global 模块), 不可用/无结果时用 <input> 组件兜底 ---- */
     openIme(opts) {
       var self = this
-      if (!isSystemImeAvailable() || !this.ime) return this.openImeOverlay(opts)
+      if (!isSystemImeAvailable() || !this.ime) {
+        log('输入', '系统输入法不可用, 使用 <input> 兜底层')
+        return this.openImeOverlay(opts)
+      }
       this._imeBusy = true
-      return this.ime.open(opts).then(function (v) {
-        self._imeBusy = false
-        self._imeClosedAt = Date.now()
+      log('输入', '尝试系统输入法')
+      return new Promise(function (resolve) {
+        var done = false
+        var timer = setTimeout(function () {
+          if (done) return
+          done = true
+          self._imeBusy = false
+          log('输入', '系统输入法 2.5s 无结果, 转 <input> 兜底层')
+          resolve('__IME_TIMEOUT__')
+        }, 2500)
+        var fin = function (v) {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          self._imeBusy = false
+          self._imeClosedAt = Date.now()
+          resolve(v)
+        }
+        try {
+          self.ime.open(opts).then(fin, function () { fin(null) })
+        } catch (e) {
+          fin(null)
+        }
+      }).then(function (v) {
+        if (v === '__IME_TIMEOUT__' || v == null) return self.openImeOverlay(opts)
         return v
-      }, function () {
-        self._imeBusy = false
-        self._imeClosedAt = Date.now()
-        return null
       })
     },
 
@@ -613,6 +634,8 @@ export default {
       this.imeOverlayValue = o.text || ''
       this.imeOverlay = true
       this._imeBusy = true
+      this.setMsg('请在输入框中输入，完成后点「确定」', 'info')
+      log('输入', '打开 <input> 输入层: ' + (o.placeholder || ''))
       return new Promise(function (resolve) {
         self._imeOverlayResolver = resolve
       })
@@ -992,7 +1015,13 @@ export default {
       this._serverTrusted = true // 服务器来自本网络实时检测或调用方指定
       this.showAdapterPick = false
       this.setMsg('正在获取 ' + adapter.name + ' 配置…', 'info')
-      var res = await adapter.loadConf(serverBase, p, this._adapterState)
+      var res
+      try {
+        res = await adapter.loadConf(serverBase, p, this._adapterState)
+      } catch (e) {
+        log('配置', 'loadConf 异常: ' + (e && e.message ? e.message : e))
+        res = { status: 'manual', msg: '获取配置异常: ' + (e && e.message ? e.message : e) }
+      }
       if (gen !== this._gen) return
       if (res.status === 'free') {
         // MAC 免认证已通过
@@ -1055,35 +1084,44 @@ export default {
       }
       this.showManualServer = false
       var gen = (this._gen = (this._gen || 0) + 1)
-      this.startPortalConf(a, this.serverBase, this._params || {}, gen)
+      this.startPortalConf(a, this.serverBase, this._params || {}, gen).catch(function (e) {
+        log('适配器', 'startPortalConf 异常: ' + (e && e.message ? e.message : e))
+      })
     },
 
     /* ---- 手动服务器 ---- */
     /* 自动探测不到/连不上服务器时, 手动输入 IP[:端口] 或主机名;
      * 认证类型也由用户点选 (未选时保留输入的地址, 先让用户选类型) */
     applyManualServer() {
-      var v = (this.manualServer || '').replace(/^\s+|\s+$/g, '')
-      if (!v) {
+      var raw = (this.manualServer || '').replace(/^\s+|\s+$/g, '')
+      if (!raw) {
         this.setMsg('请先输入服务器地址', 'warn')
         return
       }
-      if (!/^[A-Za-z0-9.\-]+(:\d+)?$/.test(v)) {
-        this.setMsg('地址格式应为 IP[:端口] 或主机名', 'error')
+      var base = this.normalizeServer(raw)
+      if (!base) {
+        this.setMsg('地址格式应为 IP[:端口] 或主机名（不支持 https）', 'error')
         return
       }
+      /* 先落盘地址: 后面即使需要再选认证类型, 也不会丢 */
+      this.serverBase = base
+      this.serverShow = base.replace(/^http:\/\//, '')
+      this._lastServer = base
+      this.manualServer = this.serverShow
       var adapter = this.activeAdapter
       if (!adapter) {
         this.showAdapterPick = true
-        this.setMsg('请点选下方认证类型', 'warn')
+        this.setMsg('服务器填为 ' + this.serverShow + '，请点选下方认证类型', 'warn')
         return
       }
-      var base = 'http://' + v
       var gen = (this._gen = (this._gen || 0) + 1)
       this.showManualServer = false
       this.showAdapterPick = false
       log('手动服务器', base + ' adapter=' + adapter.id)
       this.saveServer(base)
-      this.startPortalConf(adapter, base, this._params || {}, gen)
+      this.startPortalConf(adapter, base, this._params || {}, gen).catch(function (e) {
+        log('手动服务器', 'startPortalConf 异常: ' + (e && e.message ? e.message : e))
+      })
     },
     saveServer(base) {
       var self = this
